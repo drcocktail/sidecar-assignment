@@ -1,0 +1,30 @@
+[
+  {
+    "action": "scan_interactive",
+    "status": "success"
+  },
+  {
+    "action": "type",
+    "args": {
+      "agent_id": "agent-id-94",
+      "text": "HMMU2048983"
+    },
+    "status": "success"
+  },
+  {
+    "action": "scan_full",
+    "status": "success"
+  },
+  {
+    "action": "click",
+    "args": {
+      "agent_id": "agent-id-95",
+      "description": "Track cargo"
+    },
+    "status": "success"
+  },
+  {
+    "action": "scan_full",
+    "status": "success"
+  }
+]

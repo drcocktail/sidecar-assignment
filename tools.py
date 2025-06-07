@@ -3,102 +3,88 @@
 import logging
 from playwright.sync_api import Page
 from bs4 import BeautifulSoup
+import re
+from typing import List, Dict, Any
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def get_interactive_elements_with_context(page: Page) -> list[dict]:
+def get_interactive_elements_with_context(page: Page) -> List[Dict[str, Any]]:
     """
-    Scans the live page, finds all interactive elements, and returns them
-    with contextual information from their parents.
+    Finds all interactive elements on the page and annotates them with a unique ID.
+    Returns a list of dictionaries, each representing an element.
     """
-    logging.info("Scanning page for interactive elements...")
-    try:
-        html_content = page.content()
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        interactive_elements = []
-        element_id_counter = 0
+    page.wait_for_load_state('networkidle')
 
-        # Find all potential interactive elements
-        targets = soup.find_all(['a', 'button', 'input'])
+    interactive_elements = page.query_selector_all(
+        "a, button, input, textarea, [role='button'], [onclick]"
+    )
 
-        for element in targets:
-            try:
-                # Assign a unique ID for the agent to reference
-                agent_id = f"agent-element-{element_id_counter}"
-                element['data-agent-id'] = agent_id
-                element_id_counter += 1
+    elements_with_context = []
+    for i, element in enumerate(interactive_elements):
+        agent_id = f"agent-id-{i}"
+        element.evaluate('(element, agentId) => element.setAttribute("data-agent-id", agentId)', agent_id)
 
-                # Extract basic info
-                tag = element.name
-                text = element.get_text(strip=True)
-                attributes = {k: v for k, v in element.attrs.items() if k in ['id', 'class', 'type', 'placeholder', 'aria-label', 'href']}
+        # Get context around the element
+        outer_html = element.evaluate("el => el.outerHTML")
 
-                # Find a meaningful parent for context
-                parent_context_text = ""
-                # A simple strategy: find the closest parent div with some text
-                parent = element.find_parent('div')
-                if parent:
-                    parent_context_text = parent.get_text(separator=' ', strip=True)
-                
-                interactive_elements.append({
-                    "agent_id": agent_id,
-                    "tag": tag,
-                    "text": text,
-                    "attributes": attributes,
-                    "context": parent_context_text[:200] # Limit context length
-                })
-            except Exception as e:
-                logging.warning(f"Could not process an element: {e}")
+        element_info = {
+            "agent_id": agent_id,
+            "tag": element.evaluate("el => el.tagName.toLowerCase()"),
+            "attributes": element.evaluate("el => Array.from(el.attributes).reduce((acc, attr) => { acc[attr.name] = attr.value; return acc; }, {})"),
+            "outer_html": outer_html,
+            "text": element.evaluate("el => el.innerText")
+        }
+        elements_with_context.append(element_info)
 
-        logging.info(f"Found {len(interactive_elements)} interactive elements.")
-        return interactive_elements
-
-    except Exception as e:
-        logging.error(f"Failed to get page content or parse HTML: {e}")
-        return []
+    return elements_with_context
 
 def perform_click(page: Page, agent_id: str):
-    """Performs a click on an element identified by its agent_id."""
-    logging.info(f"Performing click on element: {agent_id}")
+    """Clicks an element with the given agent_id."""
     selector = f"[data-agent-id='{agent_id}']"
-    try:
-        page.locator(selector).click(timeout=10000)
-        # Wait for potential navigation or content load after click
-        page.wait_for_load_state('domcontentloaded', timeout=5000)
-    except Exception as e:
-        logging.error(f"Failed to click element {agent_id}: {e}")
-        raise
-    return f"Successfully clicked element {agent_id}"
+    element = page.query_selector(selector)
+    if element:
+        element.click()
+    else:
+        raise ValueError(f"Could not find element with agent_id: {agent_id}")
 
 def perform_type(page: Page, agent_id: str, text: str):
-    """Types text into an element identified by its agent_id."""
-    logging.info(f"Typing into element: {agent_id}")
+    """Types text into an element with the given agent_id."""
     selector = f"[data-agent-id='{agent_id}']"
-    try:
-        page.locator(selector).fill(text, timeout=10000)
-    except Exception as e:
-        logging.error(f"Failed to type into element {agent_id}: {e}")
-        raise
-    return f"Successfully typed into element {agent_id}"
+    element = page.query_selector(selector)
+    if element:
+        element.type(text)
+    else:
+        raise ValueError(f"Could not find element with agent_id: {agent_id}")
 
-def extract_page_data(page: Page, elements_to_extract: list[dict]) -> dict:
-    """Extracts text from specified elements."""
-    logging.info("Extracting final data from page...")
-    extracted_data = {}
-    html_content = page.content()
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # This part can be enhanced with Gemini as well to find text 'near' a label
-    # For simplicity, we'll assume a direct approach for now.
-    # A real implementation would be more robust.
-    voyage_element = soup.find(lambda tag: 'Voyage' in tag.get_text())
-    arrival_element = soup.find(lambda tag: 'Estimated Arrival Date' in tag.get_text())
-    
-    if voyage_element and voyage_element.find_next_sibling():
-         extracted_data['voyage_number'] = voyage_element.find_next_sibling().get_text(strip=True)
-    if arrival_element and arrival_element.find_next_sibling():
-        extracted_data['arrival_date'] = arrival_element.find_next_sibling().get_text(strip=True)
+def extract_page_data(page: Page, selectors: List[str]) -> Dict[str, str]:
+    """Extracts data from the page based on a list of CSS selectors."""
+    data = {}
+    for selector in selectors:
+        element = page.query_selector(selector)
+        if element:
+            data[selector] = element.inner_text()
+        else:
+            data[selector] = "Not found"
+    return data
 
-    return extracted_data
+def get_page_content_summary(page: Page) -> str:
+    """
+    Gets a summary of the page's text content, cleaned for the LLM.
+    """
+    soup = BeautifulSoup(page.content(), "html.parser")
+    
+    # Remove script and style elements
+    for script_or_style in soup(["script", "style"]):
+        script_or_style.decompose()
+
+    text = soup.get_text()
+    
+    # Clean up whitespace
+    lines = (line.strip() for line in text.splitlines())
+    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+    cleaned_text = '\n'.join(chunk for chunk in chunks if chunk)
+    
+    # Truncate for brevity
+    max_length = 5000 
+    return cleaned_text[:max_length] if len(cleaned_text) > max_length else cleaned_text
